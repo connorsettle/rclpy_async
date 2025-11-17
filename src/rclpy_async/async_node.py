@@ -158,6 +158,22 @@ class AsyncNode(NodeProto):
             return getattr(inner, name)
         raise AttributeError(name)
 
+    def __getattribute__(self, name: str) -> Any:
+        """Attribute access with delegation for Protocol stub members."""
+        # Fast-path for private/internal attributes to avoid recursion.
+        if name.startswith("_AsyncNode__"):
+            return super().__getattribute__(name)
+
+        inner = super().__getattribute__("_AsyncNode__inner")
+        # Delegate protocol-defined members unless overridden in AsyncNode.
+        if (
+            inner is not None
+            and name in _DELEGATE_NAMES
+            and not _is_overridden(type(self), name)
+        ):
+            return getattr(inner, name)
+        return super().__getattribute__(name)
+
     def __setattr__(self, name: str, value: Any) -> None:
         # Allow normal setting for our private / known attributes.
         if (
