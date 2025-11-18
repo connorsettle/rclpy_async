@@ -1,10 +1,9 @@
 {
-  "name": "ROS2 with uv",
+  "name": "ROS2",
   "build": {
     "dockerfile": "Dockerfile"
   },
   "features": {
-    "ghcr.io/devcontainers-extra/features/uv:latest": {},
     "ghcr.io/devcontainers/features/git-lfs:latest": {}
   }
 }

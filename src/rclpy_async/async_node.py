@@ -1,5 +1,6 @@
 import inspect
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 from typing import (
     Any,
     Awaitable,
@@ -57,7 +58,28 @@ class TopicHandlerSpec:
     async_fn: Callable[[Any], Awaitable[None]]
 
 
-TParams = TypeVar("TParams")
+class ParameterSchema(ABC):
+    """Abstract base class for node parameter schema used by `AsyncNode`.
+
+    Subclasses must provide a method `as_parameters` returning an iterable
+    of parameter declarations accepted by `Node.declare_parameters`, and a
+    classmethod `from_parameters` that constructs and returns an instance of
+    the schema populated from a getter callable (e.g. `node.get_parameter`).
+    """
+
+    @abstractmethod
+    def as_parameters(cls) -> list[tuple[str, Any]]:
+        """Return list of (name, value) tuples for declaration."""
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_parameters(cls, get_parameter: Callable[[str], Any]) -> "ParameterSchema":
+        """Construct instance from declared parameters."""
+        raise NotImplementedError
+
+
+TParams = TypeVar("TParams", bound=ParameterSchema)
 
 
 @dataclass
@@ -139,7 +161,7 @@ class AsyncNode(NodeProto):
                     if kwargs.get("namespace", None) is not None
                     else ""
                 ),
-                parameters=self.__params_type.as_parameters(),
+                parameters=self.__params_type().as_parameters(),
             )
 
             self.params = self.__params_type.from_parameters(self.__inner.get_parameter)
