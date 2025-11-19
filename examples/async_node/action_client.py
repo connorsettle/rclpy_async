@@ -1,33 +1,27 @@
+import anyio
 import rclpy
 from example_interfaces.action import Fibonacci
-from rclpy.action import ActionClient
-from rclpy.node import Node
+
+import rclpy_async
+from rclpy_async.async_node import AsyncNode
+
+node = AsyncNode("fibonacci_action_client")
 
 
-class FibonacciActionClient(Node):
+async def main():
+    rclpy.init()
+    node.initialize()
 
-    def __init__(self):
-        super().__init__("fibonacci_action_client")
-        self._action_client = ActionClient(self, Fibonacci, "fibonacci")
+    async with rclpy_async.start_executor() as xtor:
+        xtor.add_node(node)
 
-    def send_goal(self, order):
-        goal_msg = Fibonacci.Goal()
-        goal_msg.order = order
-
-        self._action_client.wait_for_server()
-
-        return self._action_client.send_goal_async(goal_msg)
-
-
-def main(args=None):
-    rclpy.init(args=args)
-
-    action_client = FibonacciActionClient()
-
-    future = action_client.send_goal(10)
-
-    rclpy.spin_until_future_complete(action_client, future)
+        with rclpy_async.action_client(node, Fibonacci, "fibonacci") as action_client:
+            result = await action_client(
+                Fibonacci.Goal(order=10),
+                lambda msg: node.get_logger().info(f"Fibonacci feedback: {msg.feedback}"),  # type: ignore
+            )
+            node.get_logger().info(f"Fibonacci result: {result}")
 
 
 if __name__ == "__main__":
-    main()
+    anyio.run(main)

@@ -1,38 +1,30 @@
+import anyio
 import rclpy
-from rclpy.node import Node
 from std_msgs.msg import String
 
+from rclpy_async.async_node import AsyncNode
 
-class MinimalPublisher(Node):
-
-    def __init__(self):
-        super().__init__("minimal_publisher")
-        self.publisher_ = self.create_publisher(String, "topic", 10)
-        timer_period = 0.5  # seconds
-        self.timer = self.create_timer(timer_period, self.timer_callback)
-        self.i = 0
-
-    def timer_callback(self):
-        msg = String()
-        msg.data = "Hello World: %d" % self.i
-        self.publisher_.publish(msg)
-        self.get_logger().info('Publishing: "%s"' % msg.data)
-        self.i += 1
+node = AsyncNode("minimal_publisher")
 
 
-def main(args=None):
-    rclpy.init(args=args)
+@node.timer(0.5)
+async def timer_callback():
+    msg = String()
+    msg.data = "Hello World: %d" % node.state.i
+    node.state.publisher_.publish(msg)
+    node.get_logger().info('Publishing: "%s"' % msg.data)
+    node.state.i += 1
 
-    minimal_publisher = MinimalPublisher()
 
-    rclpy.spin(minimal_publisher)
+async def main():
+    rclpy.init()
+    node.initialize()
 
-    # Destroy the node explicitly
-    # (optional - otherwise it will be done automatically
-    # when the garbage collector destroys the node object)
-    minimal_publisher.destroy_node()
-    rclpy.shutdown()
+    node.state.i = 0
+    node.state.publisher_ = node.create_publisher(String, "topic", 10)
+
+    await node.spin_one()
 
 
 if __name__ == "__main__":
-    main()
+    anyio.run(main)

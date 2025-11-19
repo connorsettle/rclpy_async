@@ -1,40 +1,35 @@
 import sys
 
+import anyio
 import rclpy
 from example_interfaces.srv import AddTwoInts
-from rclpy.node import Node
+
+import rclpy_async
+from rclpy_async.async_node import AsyncNode
+
+node = AsyncNode("minimal_client_async")
 
 
-class MinimalClientAsync(Node):
-
-    def __init__(self):
-        super().__init__("minimal_client_async")
-        self.cli = self.create_client(AddTwoInts, "add_two_ints")
-        while not self.cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info("service not available, waiting again...")
-        self.req = AddTwoInts.Request()
-
-    def send_request(self, a, b):
-        self.req.a = a
-        self.req.b = b
-        return self.cli.call_async(self.req)
-
-
-def main():
+async def main():
     rclpy.init()
+    node.initialize()
 
-    minimal_client = MinimalClientAsync()
-    future = minimal_client.send_request(int(sys.argv[1]), int(sys.argv[2]))
-    rclpy.spin_until_future_complete(minimal_client, future)
-    response = future.result()
-    minimal_client.get_logger().info(
-        "Result of add_two_ints: for %d + %d = %d"
-        % (int(sys.argv[1]), int(sys.argv[2]), response.sum)
-    )
-
-    minimal_client.destroy_node()
-    rclpy.shutdown()
+    async with rclpy_async.start_executor() as executor:
+        executor.add_node(node)
+        with rclpy_async.service_client(
+            node,
+            AddTwoInts,
+            "add_two_ints",
+        ) as cli:
+            req = AddTwoInts.Request()
+            req.a = int(sys.argv[1])
+            req.b = int(sys.argv[2])
+            response = await cli(req)
+            node.get_logger().info(
+                "Result of add_two_ints: for %d + %d = %d"
+                % (int(sys.argv[1]), int(sys.argv[2]), response.sum)
+            )
 
 
 if __name__ == "__main__":
-    main()
+    anyio.run(main)

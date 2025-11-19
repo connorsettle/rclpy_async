@@ -1,32 +1,26 @@
+import anyio
 import rclpy
 from example_interfaces.srv import AddTwoInts
-from rclpy.node import Node
+
+from rclpy_async.async_node import AsyncNode
+
+node = AsyncNode("minimal_service")
 
 
-class MinimalService(Node):
+@node.service(AddTwoInts, "add_two_ints")
+async def add_two_ints_callback(request, response):
+    response.sum = request.a + request.b
+    node.get_logger().info("Incoming request \ta: %d b: %d" % (request.a, request.b))
 
-    def __init__(self):
-        super().__init__("minimal_service")
-        self.srv = self.create_service(
-            AddTwoInts, "add_two_ints", self.add_two_ints_callback
-        )
-
-    def add_two_ints_callback(self, request, response):
-        response.sum = request.a + request.b
-        self.get_logger().info("Incoming request\na: %d b: %d" % (request.a, request.b))
-
-        return response
+    return response
 
 
-def main():
+async def main():
     rclpy.init()
+    node.initialize()
 
-    minimal_service = MinimalService()
-
-    rclpy.spin(minimal_service)
-
-    rclpy.shutdown()
+    await node.spin_one()
 
 
 if __name__ == "__main__":
-    main()
+    anyio.run(main)

@@ -1,26 +1,23 @@
 import inspect
-from dataclasses import dataclass
-from abc import ABC, abstractmethod
-from typing import (
-    Any,
-    Awaitable,
-    Callable,
-    Generic,
-    List,
-    Optional,
-    Type,
-    TypeVar,
-    Union,
-)
+from typing import Any, Awaitable, Callable, List, Optional, Type, TypeVar, Union
 
 import anyio
 import rclpy
+from rclpy.action.server import ServerGoalHandle
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
 import rclpy_async
 
-from ._node_proto import NodeProto
+from ._async_node import (
+    ActionHandlerSpec,
+    NodeProto,
+    ParameterSchema,
+    ServiceHandlerSpec,
+    State,
+    TimerHandlerSpec,
+    TopicHandlerSpec,
+)
 
 # Public interface member names gathered from the Protocol; used for delegation.
 _DELEGATE_NAMES = {
@@ -43,85 +40,7 @@ def _is_overridden(cls: Type[Any], name: str) -> bool:
     return True
 
 
-@dataclass
-class TopicHandlerSpec:
-    """Specification for a subscription handler.
-
-    async_fn signature: (message: MsgType) -> Awaitable[None]
-    """
-
-    msg_type: type
-    topic_name: str
-    qos_profile: QoSProfile
-    max_queue_size: int
-    drop_oldest: bool
-    async_fn: Callable[[Any], Awaitable[None]]
-
-
-class ParameterSchema(ABC):
-    """Abstract base class for node parameter schema used by `AsyncNode`.
-
-    Subclasses must provide a method `as_parameters` returning an iterable
-    of parameter declarations accepted by `Node.declare_parameters`, and a
-    classmethod `from_parameters` that constructs and returns an instance of
-    the schema populated from a getter callable (e.g. `node.get_parameter`).
-    """
-
-    @abstractmethod
-    def as_parameters(cls) -> list[tuple[str, Any]]:
-        """Return list of (name, value) tuples for declaration."""
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def from_parameters(cls, get_parameter: Callable[[str], Any]) -> "ParameterSchema":
-        """Construct instance from declared parameters."""
-        raise NotImplementedError
-
-
 TParams = TypeVar("TParams", bound=ParameterSchema)
-
-
-@dataclass
-class TimerHandlerSpec(Generic[TParams]):
-    """Specification for a timer handler.
-
-    async_fn signature: () -> Awaitable[None]
-    timer_period_sec may be float or a callable taking params -> float.
-    """
-
-    timer_period_sec: Union[float, Callable[[TParams], float]]
-    max_queue_size: int
-    drop_oldest: bool
-    async_fn: Callable[[], Awaitable[None]]
-
-
-class State:
-    """
-    An object that can be used to store arbitrary state.
-
-    Used for `request.state` and `app.state`.
-    """
-
-    _state: dict[str, Any]
-
-    def __init__(self, state: dict[str, Any] | None = None):
-        if state is None:
-            state = {}
-        super().__setattr__("_state", state)
-
-    def __setattr__(self, key: Any, value: Any) -> None:
-        self._state[key] = value
-
-    def __getattr__(self, key: Any) -> Any:
-        try:
-            return self._state[key]
-        except KeyError:
-            message = "'{}' object has no attribute '{}'"
-            raise AttributeError(message.format(self.__class__.__name__, key))
-
-    def __delattr__(self, key: Any) -> None:
-        del self._state[key]
 
 
 class AsyncNode(NodeProto):
@@ -131,9 +50,11 @@ class AsyncNode(NodeProto):
     Provides decorators for subscription and timer handlers executed with anyio.
     """
 
+    __action_handler_specs: List[ActionHandlerSpec] = []
     __inner: Optional[Node] = None  # Underlying rclpy Node instance
     __node_name: str
     __params_type: Optional[Type[TParams]]
+    __service_handler_specs: List[ServiceHandlerSpec] = []
     __timer_handler_specs: List[TimerHandlerSpec[TParams]] = []
     __topic_handler_specs: List[TopicHandlerSpec] = []
     params: Optional[TParams] = None
@@ -161,11 +82,10 @@ class AsyncNode(NodeProto):
                     if kwargs.get("namespace", None) is not None
                     else ""
                 ),
-                parameters=self.__params_type().as_parameters(),
+                parameters=self.__params_type.as_parameters(),
             )
-
-            self.params = self.__params_type.from_parameters(self.__inner.get_parameter)
-            self.__inner.get_logger().info(f"PubSub parameters: {self.params}")
+            self.params = self.__params_type.from_node(self.__inner)
+            self.__inner.get_logger().debug(f"Parameters: {self.params}")
 
     def __getattr__(self, name: str) -> Any:
         """Delegate protocol members to inner node when not overridden locally."""
@@ -221,6 +141,41 @@ class AsyncNode(NodeProto):
     def __repr__(self) -> str:
         return f"<AsyncNode name={self.__node_name} inner={self.__inner!r}>"
 
+    def action(self, action_type: type, action_name: str, **kwargs) -> Callable[
+        [Callable[[ServerGoalHandle], Awaitable[Any]]],
+        Callable[[ServerGoalHandle], Awaitable[Any]],
+    ]:
+        """Decorator registering an async action handler."""
+
+        def _decorator(async_fn: Callable[[ServerGoalHandle], Awaitable[Any]]):
+            spec = ActionHandlerSpec(
+                action_type=action_type,
+                action_name=action_name,
+                kwargs=kwargs,
+                async_fn=async_fn,
+            )
+            self.__action_handler_specs.append(spec)
+            return async_fn
+
+        return _decorator
+
+    def service(
+        self, srv_type: type, srv_name: str, **kwargs
+    ) -> Callable[[Callable[[Any], Awaitable[None]]], Callable[[Any], Awaitable[None]]]:
+        """Decorator registering an async service handler."""
+
+        def _decorator(async_fn: Callable[[Any], Awaitable[None]]):
+            spec = ServiceHandlerSpec(
+                srv_type=srv_type,
+                srv_name=srv_name,
+                kwargs=kwargs,
+                async_fn=async_fn,
+            )
+            self.__service_handler_specs.append(spec)
+            return async_fn
+
+        return _decorator
+
     def subscription(
         self,
         msg_type: type,
@@ -272,6 +227,36 @@ class AsyncNode(NodeProto):
 
         async with anyio.create_task_group() as tg:
             _attached_consumers = []
+            _action_servers = []
+
+            for spec in self.__action_handler_specs:
+                async_fn = spec.async_fn
+                action_type = spec.action_type
+                action_name = spec.action_name
+                kwargs = spec.kwargs
+
+                _action_servers.append(
+                    rclpy_async.action_server(
+                        self.__inner,
+                        action_type,
+                        action_name,
+                        async_fn,
+                        **kwargs,
+                    )
+                )
+
+            for spec in self.__service_handler_specs:
+                async_fn = spec.async_fn
+                srv_type = spec.srv_type
+                srv_name = spec.srv_name
+                kwargs = spec.kwargs
+
+                self.__inner.create_service(
+                    srv_type,
+                    srv_name,
+                    async_fn,
+                    **kwargs,
+                )
 
             for spec in self.__topic_handler_specs:
                 async_fn = spec.async_fn  # expects (ctx, msg)
@@ -280,6 +265,7 @@ class AsyncNode(NodeProto):
                 qos_profile = spec.qos_profile
                 max_queue_size = spec.max_queue_size
                 drop_oldest = spec.drop_oldest
+                kwargs = spec.kwargs
 
                 send_stream, receive_stream = anyio.create_memory_object_stream(
                     max_queue_size
@@ -302,7 +288,11 @@ class AsyncNode(NodeProto):
                                 pass
 
                 self.__inner.create_subscription(
-                    msg_type, topic_name, _sub_callback, qos_profile=qos_profile
+                    msg_type,
+                    topic_name,
+                    _sub_callback,
+                    qos_profile=qos_profile,
+                    **kwargs,
                 )
 
                 async def _consumer_task(fn=async_fn, _recv=receive_stream):
@@ -313,6 +303,7 @@ class AsyncNode(NodeProto):
 
             for spec in self.__timer_handler_specs:
                 async_fn = spec.async_fn  # expects (ctx)
+                kwargs = spec.kwargs
                 timer_period_sec = spec.timer_period_sec
                 if callable(timer_period_sec):
                     try:
@@ -344,7 +335,7 @@ class AsyncNode(NodeProto):
                             except anyio.WouldBlock:
                                 pass
 
-                self.__inner.create_timer(period_value, _timer_callback)
+                self.__inner.create_timer(period_value, _timer_callback, **kwargs)
 
                 async def _consumer_task(fn=async_fn, _recv=receive_stream):
                     async for _ in _recv:
@@ -355,8 +346,15 @@ class AsyncNode(NodeProto):
             for consumer_task in _attached_consumers:
                 tg.start_soon(consumer_task)
 
-            # Sleep forever; cancellation of the task group stops processing.
-            await anyio.sleep(float("inf"))
+            for action_server in _action_servers:
+                action_server.__enter__()
+
+            try:
+                # Sleep forever; cancellation of the task group stops processing.
+                await anyio.sleep(float("inf"))
+            finally:
+                for action_server in _action_servers:
+                    action_server.__exit__(None, None, None)
 
     async def spin_one(self) -> None:
         """Run a single executor managing this node and spin handlers concurrently."""

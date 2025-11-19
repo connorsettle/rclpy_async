@@ -1,47 +1,41 @@
-import time
-
+import anyio
 import rclpy
 from example_interfaces.action import Fibonacci
-from rclpy.action import ActionServer
-from rclpy.node import Node
+from rclpy.action.server import ServerGoalHandle
+
+from rclpy_async.async_node import AsyncNode
+
+node = AsyncNode("fibonacci_action_server_node")
 
 
-class FibonacciActionServer(Node):
+@node.action(Fibonacci, "fibonacci")
+async def execute_callback(goal_handle: ServerGoalHandle):
+    node.get_logger().info("Executing goal...")
 
-    def __init__(self):
-        super().__init__("fibonacci_action_server")
-        self._action_server = ActionServer(
-            self, Fibonacci, "fibonacci", self.execute_callback
+    feedback_msg = Fibonacci.Feedback()
+    feedback_msg.sequence = [0, 1]
+
+    for i in range(1, goal_handle.request.order):
+        feedback_msg.sequence.append(
+            feedback_msg.sequence[i] + feedback_msg.sequence[i - 1]
         )
+        node.get_logger().info("Feedback: {0}".format(feedback_msg.sequence))
+        goal_handle.publish_feedback(feedback_msg)
+        await anyio.sleep(1)
 
-    def execute_callback(self, goal_handle):
-        self.get_logger().info("Executing goal...")
+    goal_handle.succeed()
 
-        feedback_msg = Fibonacci.Feedback()
-        feedback_msg.sequence = [0, 1]
-
-        for i in range(1, goal_handle.request.order):
-            feedback_msg.sequence.append(
-                feedback_msg.sequence[i] + feedback_msg.sequence[i - 1]
-            )
-            self.get_logger().info("Feedback: {0}".format(feedback_msg.sequence))
-            goal_handle.publish_feedback(feedback_msg)
-            time.sleep(1)
-
-        goal_handle.succeed()
-
-        result = Fibonacci.Result()
-        result.sequence = feedback_msg.sequence
-        return result
+    result = Fibonacci.Result()
+    result.sequence = feedback_msg.sequence
+    return result
 
 
-def main(args=None):
-    rclpy.init(args=args)
+async def main():
+    rclpy.init()
+    node.initialize()
 
-    fibonacci_action_server = FibonacciActionServer()
-
-    rclpy.spin(fibonacci_action_server)
+    await node.spin_one()
 
 
 if __name__ == "__main__":
-    main()
+    anyio.run(main)
