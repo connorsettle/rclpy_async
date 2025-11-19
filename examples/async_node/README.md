@@ -9,27 +9,27 @@ The following samples are based off the ROS2 documented [tutorials](https://docs
 A simple publisher and subscriber:
 ```sh
 # Terminal 1:
-python3 ./examples/async_node/subscriber.py
+python3 -m examples.async_node.subscriber
 
 # Terminal 2:
-python3 ./examples/async_node/publisher.py
+python3 -m examples.async_node.publisher
 ```
 
 A simple service and client:
 ```sh
 # Terminal 1:
-python3 ./examples/async_node/service.py
+python3 -m examples.async_node.service
 
 # Terminal 2:
-python3 ./examples/async_node/client.py 1 2
+python3 -m examples.async_node.client 1 2
 ```
 
 Using parameters in a class:
 ```sh
 # Start the node
-python3 ./examples/async_node/param.py
+python3 -m examples.async_node.param
 # [Optionally] start the node with the parameter as something other that "world" by adding:
-python3 ./examples/async_node/param.py --ros-args -p my_parameter:=world2
+python3 -m examples.async_node.param --ros-args -p my_parameter:=world2
 
 # In another terminal set the parameter again
 ros2 param set /minimal_param_node my_parameter earth
@@ -38,8 +38,8 @@ ros2 param set /minimal_param_node my_parameter earth
 An action server and client:
 ```sh
 # Terminal 1:
-python3 ./examples/async_node/action_server.py
+python3 -m examples.async_node.action_server
 
 # Terminal 2:
-python3 ./examples/async_node/action_client.py
+python3 -m examples.async_node.action_client
 ```

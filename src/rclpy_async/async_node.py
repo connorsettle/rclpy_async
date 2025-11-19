@@ -12,7 +12,6 @@ import rclpy_async
 from ._async_node import (
     ActionHandlerSpec,
     NodeProto,
-    ParameterSchema,
     ServiceHandlerSpec,
     State,
     TimerHandlerSpec,
@@ -40,9 +39,6 @@ def _is_overridden(cls: Type[Any], name: str) -> bool:
     return True
 
 
-TParams = TypeVar("TParams", bound=ParameterSchema)
-
-
 class AsyncNode(NodeProto):
     """Asynchronous wrapper around a ROS 2 `Node` using dynamic delegation.
 
@@ -50,42 +46,23 @@ class AsyncNode(NodeProto):
     Provides decorators for subscription and timer handlers executed with anyio.
     """
 
-    __action_handler_specs: List[ActionHandlerSpec] = []
     __inner: Optional[Node] = None  # Underlying rclpy Node instance
     __node_name: str
-    __params_type: Optional[Type[TParams]]
-    __service_handler_specs: List[ServiceHandlerSpec] = []
-    __timer_handler_specs: List[TimerHandlerSpec[TParams]] = []
-    __topic_handler_specs: List[TopicHandlerSpec] = []
-    params: Optional[TParams] = None
     state = State()  # Arbitrary user state container
 
-    def __init__(self, node_name: str, params_type: Type[TParams] = None):
+    __action_handler_specs: List[ActionHandlerSpec] = []
+    __service_handler_specs: List[ServiceHandlerSpec] = []
+    __timer_handler_specs: List[TimerHandlerSpec] = []
+    __topic_handler_specs: List[TopicHandlerSpec] = []
+
+    def __init__(self, node_name: str):
         self.__node_name = node_name
-        self.__params_type = params_type  # Parameter schema type or None
 
-    @property
-    def inner(self) -> Optional[Node]:
-        """Return underlying `Node` (read-only reference)."""
-        return self.__inner
-
-    def initialize(self, **kwargs) -> None:
+    def initialize(self) -> None:
         """Create underlying rclpy Node and declare parameters if a schema is provided."""
         if self.__inner is not None:
             raise RuntimeError("AsyncNode already initialized")
         self.__inner = rclpy.create_node(self.__node_name)
-
-        if self.__params_type is not None:
-            self.__inner.declare_parameters(
-                namespace=(
-                    kwargs.get("namespace")
-                    if kwargs.get("namespace", None) is not None
-                    else ""
-                ),
-                parameters=self.__params_type.as_parameters(),
-            )
-            self.params = self.__params_type.from_node(self.__inner)
-            self.__inner.get_logger().debug(f"Parameters: {self.params}")
 
     def __getattr__(self, name: str) -> Any:
         """Delegate protocol members to inner node when not overridden locally."""
@@ -183,6 +160,7 @@ class AsyncNode(NodeProto):
         qos_profile: QoSProfile = 10,
         max_queue_size: int = 0,
         drop_oldest: bool = False,
+        **kwargs,
     ) -> Callable[[Callable[[Any], Awaitable[None]]], Callable[[Any], Awaitable[None]]]:
         """Decorator registering an async subscription handler."""
 
@@ -193,6 +171,7 @@ class AsyncNode(NodeProto):
                 qos_profile=qos_profile,
                 max_queue_size=max_queue_size,
                 drop_oldest=drop_oldest,
+                kwargs=kwargs,
                 async_fn=async_fn,
             )
             self.__topic_handler_specs.append(spec)
@@ -202,9 +181,10 @@ class AsyncNode(NodeProto):
 
     def timer(
         self,
-        timer_period_sec: Union[float, Callable[[TParams], float]],
+        timer_period_sec: Union[float, Callable[[], float]],
         max_queue_size: int = 0,
         drop_oldest: bool = False,
+        **kwargs,
     ) -> Callable[[Callable[[], Awaitable[None]]], Callable[[], Awaitable[None]]]:
         """Decorator registering an async timer handler."""
 
@@ -213,6 +193,7 @@ class AsyncNode(NodeProto):
                 timer_period_sec=timer_period_sec,
                 max_queue_size=max_queue_size,
                 drop_oldest=drop_oldest,
+                kwargs=kwargs,
                 async_fn=async_fn,
             )
             self.__timer_handler_specs.append(spec)
@@ -307,7 +288,7 @@ class AsyncNode(NodeProto):
                 timer_period_sec = spec.timer_period_sec
                 if callable(timer_period_sec):
                     try:
-                        period_value = float(timer_period_sec(self.params))
+                        period_value = float(timer_period_sec())
                     except Exception:
                         period_value = 1.0
                 else:

@@ -1,28 +1,34 @@
 import anyio
 import rclpy
-from dataclasses import dataclass
 
-from rclpy_async.async_node import AsyncNode, ParameterSchema
-
-
-@dataclass
-class NodeParameters(ParameterSchema):
-    my_parameter: str = "world"
+from rclpy_async.async_node import AsyncNode
+from rclpy.parameter import Parameter
 
 
-node = AsyncNode("minimal_param_node", NodeParameters)
+
+node = AsyncNode("minimal_param_node")
 
 
-@node.timer(0.5)
+@node.timer(lambda: node.get_parameter("timer_period").get_parameter_value().double_value)
 async def timer_callback():
-    # Read current value from ROS parameter server (dynamic) and then update it.
-    node.get_logger().info(f"Hello {node.params.my_parameter}!")
-    node.params.my_parameter = "world"
-
+    node.get_logger().info(f"Hello {node.get_parameter('my_parameter').get_parameter_value().string_value}!")
+    node.set_parameters([
+        Parameter(
+            "my_parameter",
+            Parameter.Type.STRING,
+            "world"
+        ),
+        Parameter(
+            "timer_period",
+            Parameter.Type.DOUBLE,
+            node.get_parameter("timer_period").get_parameter_value().double_value,
+        )
+    ])
 
 async def main():
     rclpy.init()
     node.initialize()
+    node.declare_parameters(namespace="", parameters=[('my_parameter', 'world'), ('timer_period', 2.0)])
 
     await node.spin_one()
 
