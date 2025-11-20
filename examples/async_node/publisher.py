@@ -1,17 +1,15 @@
 import anyio
 import rclpy
-from std_msgs.msg import String
-
 import rclpy_async
 from rclpy_async import AsyncNode, async_run
+from std_msgs.msg import String
 
 node = AsyncNode("minimal_publisher")
 
 
 @node.timer(0.5)
 async def timer_callback():
-    msg = String()
-    msg.data = "Hello World: %d" % node.state.i
+    msg = String(data="Hello World: %d" % node.state.i)
     node.state.publisher_.publish(msg)
     node.get_logger().info('Publishing: "%s"' % msg.data)
     node.state.i += 1
