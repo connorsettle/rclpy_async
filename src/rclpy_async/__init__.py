@@ -1,8 +1,11 @@
 from importlib.metadata import version
 
+from rclpy_async._async_node import BackpressureHandlerSpec
 from rclpy_async.action_client import action_client
 from rclpy_async.action_server import action_server
 from rclpy_async.async_executor import start_executor
+from rclpy_async.async_node import AsyncNode
+from rclpy_async.async_node import run as async_run
 from rclpy_async.service_client import service_client
 from rclpy_async.utilities import (
     future_result,
@@ -21,4 +24,7 @@ __all__ = [
     "service_client",
     "action_client",
     "action_server",
+    "async_run",
+    "AsyncNode",
+    "BackpressureHandlerSpec",
 ]

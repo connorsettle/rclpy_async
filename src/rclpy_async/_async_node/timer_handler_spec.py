@@ -1,17 +1,17 @@
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Union
+from typing import Callable, Union
+
+from ._base_handler_spec import BaseHandlerSpec
 
 
 @dataclass
-class TimerHandlerSpec():
-    """Specification for a timer handler.
+class TimerHandlerSpec(BaseHandlerSpec[[], None]):
+    """Specification for a ROS service handler
 
     async_fn signature: () -> Awaitable[None]
-    timer_period_sec may be float or a callable None -> float.
+
+    Args:
+        BaseHandlerSpec (_type_): Inherits from BaseHandlerSpec
     """
 
     timer_period_sec: Union[float, Callable[[], float]]
-    max_queue_size: int
-    drop_oldest: bool
-    kwargs: dict[str, Any]
-    async_fn: Callable[[], Awaitable[None]]

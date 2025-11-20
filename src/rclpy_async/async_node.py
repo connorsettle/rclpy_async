@@ -1,5 +1,6 @@
 import inspect
-from typing import Any, Awaitable, Callable, List, Optional, Type, TypeVar, Union
+from contextlib import ExitStack
+from typing import Any, Awaitable, Callable, List, Optional, Tuple, Type, Union
 
 import anyio
 import rclpy
@@ -11,6 +12,7 @@ import rclpy_async
 
 from ._async_node import (
     ActionHandlerSpec,
+    BackpressureHandlerSpec,
     NodeProto,
     ServiceHandlerSpec,
     State,
@@ -47,8 +49,12 @@ class AsyncNode(NodeProto):
     """
 
     __inner: Optional[Node] = None  # Underlying rclpy Node instance
-    __node_name: str
     state = State()  # Arbitrary user state container
+    __node_name: str
+    __exit_stack = ExitStack()
+    __fallback_values: dict[str, Any] = (
+        {}
+    )  # Local storage for protocol-only properties when inner lacks them.
 
     __action_handler_specs: List[ActionHandlerSpec] = []
     __service_handler_specs: List[ServiceHandlerSpec] = []
@@ -84,29 +90,37 @@ class AsyncNode(NodeProto):
             return super().__getattribute__(name)
 
         inner = super().__getattribute__("_AsyncNode__inner")
-        # Delegate protocol-defined members unless overridden in AsyncNode.
-        if (
-            inner is not None
-            and name in _DELEGATE_NAMES
-            and not _is_overridden(type(self), name)
-        ):
-            return getattr(inner, name)
+        # For protocol-defined members not overridden locally, attempt delegation.
+        if name in _DELEGATE_NAMES and not _is_overridden(type(self), name):
+            if inner is not None and hasattr(inner, name):
+                return getattr(inner, name)
+            # Fallback to locally stored value if inner doesn't provide it.
+            fb = super().__getattribute__("_AsyncNode__fallback_values")
+            if name in fb:
+                return fb[name]
         return super().__getattribute__(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # Allow normal setting for our private / known attributes.
+        # Allow normal setting for private / explicitly implemented attributes on AsyncNode itself.
         if (
             name.startswith("_AsyncNode__")
             or name in {"params", "state"}
-            or hasattr(type(self), name)
+            or name in type(self).__dict__
         ):
             super().__setattr__(name, value)
             return
-        inner = getattr(self, "_AsyncNode__inner", None)
-        if inner is not None and hasattr(inner, name):
-            setattr(inner, name, value)
-        else:
-            super().__setattr__(name, value)
+        # Delegation path for protocol-defined members not overridden here.
+        if name in _DELEGATE_NAMES and not _is_overridden(type(self), name):
+            inner = getattr(self, "_AsyncNode__inner", None)
+            if inner is not None and hasattr(inner, name):
+                setattr(inner, name, value)
+                return
+            # Store locally when inner lacks the attribute (e.g. protocol stub property).
+            fb = getattr(self, "_AsyncNode__fallback_values")
+            fb[name] = value
+            return
+        # Ordinary attribute (not protocol-defined): store on wrapper instance.
+        super().__setattr__(name, value)
 
     def __dir__(self) -> List[str]:
         inner = self.__inner
@@ -116,39 +130,53 @@ class AsyncNode(NodeProto):
         return sorted(names)
 
     def __repr__(self) -> str:
-        return f"<AsyncNode name={self.__node_name} inner={self.__inner!r}>"
+        return f"<AsyncNode inner={self.__inner!r}>"
 
-    def action(self, action_type: type, action_name: str, **kwargs) -> Callable[
+    def action(
+        self,
+        action_type: type,
+        action_name: str,
+        backpressure_handler: Optional[BackpressureHandlerSpec] = None,
+        **kwargs,
+    ) -> Callable[
         [Callable[[ServerGoalHandle], Awaitable[Any]]],
         Callable[[ServerGoalHandle], Awaitable[Any]],
     ]:
         """Decorator registering an async action handler."""
 
         def _decorator(async_fn: Callable[[ServerGoalHandle], Awaitable[Any]]):
-            spec = ActionHandlerSpec(
-                action_type=action_type,
-                action_name=action_name,
-                kwargs=kwargs,
-                async_fn=async_fn,
+            self.__action_handler_specs.append(
+                ActionHandlerSpec(
+                    action_name=action_name,
+                    action_type=action_type,
+                    async_fn=async_fn,
+                    backpressure_handler=backpressure_handler,
+                    kwargs=kwargs,
+                )
             )
-            self.__action_handler_specs.append(spec)
             return async_fn
 
         return _decorator
 
     def service(
-        self, srv_type: type, srv_name: str, **kwargs
+        self,
+        srv_type: type,
+        srv_name: str,
+        backpressure_handler: Optional[BackpressureHandlerSpec] = None,
+        **kwargs,
     ) -> Callable[[Callable[[Any], Awaitable[None]]], Callable[[Any], Awaitable[None]]]:
         """Decorator registering an async service handler."""
 
         def _decorator(async_fn: Callable[[Any], Awaitable[None]]):
-            spec = ServiceHandlerSpec(
-                srv_type=srv_type,
-                srv_name=srv_name,
-                kwargs=kwargs,
-                async_fn=async_fn,
+            self.__service_handler_specs.append(
+                ServiceHandlerSpec(
+                    async_fn=async_fn,
+                    backpressure_handler=backpressure_handler,
+                    kwargs=kwargs,
+                    srv_name=srv_name,
+                    srv_type=srv_type,
+                )
             )
-            self.__service_handler_specs.append(spec)
             return async_fn
 
         return _decorator
@@ -158,23 +186,22 @@ class AsyncNode(NodeProto):
         msg_type: type,
         topic_name: str,
         qos_profile: QoSProfile = 10,
-        max_queue_size: int = 0,
-        drop_oldest: bool = False,
+        backpressure_handler: Optional[BackpressureHandlerSpec] = None,
         **kwargs,
     ) -> Callable[[Callable[[Any], Awaitable[None]]], Callable[[Any], Awaitable[None]]]:
         """Decorator registering an async subscription handler."""
 
         def _decorator(async_fn: Callable[[Any], Awaitable[None]]):
-            spec = TopicHandlerSpec(
-                msg_type=msg_type,
-                topic_name=topic_name,
-                qos_profile=qos_profile,
-                max_queue_size=max_queue_size,
-                drop_oldest=drop_oldest,
-                kwargs=kwargs,
-                async_fn=async_fn,
+            self.__topic_handler_specs.append(
+                TopicHandlerSpec(
+                    async_fn=async_fn,
+                    backpressure_handler=backpressure_handler,
+                    kwargs=kwargs,
+                    msg_type=msg_type,
+                    qos_profile=qos_profile,
+                    topic_name=topic_name,
+                )
             )
-            self.__topic_handler_specs.append(spec)
             return async_fn
 
         return _decorator
@@ -182,165 +209,165 @@ class AsyncNode(NodeProto):
     def timer(
         self,
         timer_period_sec: Union[float, Callable[[], float]],
-        max_queue_size: int = 0,
-        drop_oldest: bool = False,
+        backpressure_handler: Optional[BackpressureHandlerSpec] = None,
         **kwargs,
     ) -> Callable[[Callable[[], Awaitable[None]]], Callable[[], Awaitable[None]]]:
         """Decorator registering an async timer handler."""
 
         def _decorator(async_fn: Callable[[], Awaitable[None]]):
-            spec = TimerHandlerSpec(
-                timer_period_sec=timer_period_sec,
-                max_queue_size=max_queue_size,
-                drop_oldest=drop_oldest,
-                kwargs=kwargs,
-                async_fn=async_fn,
+            self.__timer_handler_specs.append(
+                TimerHandlerSpec(
+                    async_fn=async_fn,
+                    backpressure_handler=backpressure_handler,
+                    kwargs=kwargs,
+                    timer_period_sec=timer_period_sec,
+                )
             )
-            self.__timer_handler_specs.append(spec)
             return async_fn
 
         return _decorator
 
-    async def spin(self) -> None:
+    def destroy_node(self) -> None:
+        """Ensure underlying node is properly destroyed."""
+        self.__exit_stack.close()
+        inner = self.__inner
+        if inner is not None:
+            inner.destroy_node()
+            self.__inner = None
+
+    def gather_coroutines(
+        self,
+    ) -> List[Callable[[], Awaitable[None]]]:
         """Start processing subscription and timer handlers until cancelled."""
         if self.__inner is None:
             raise RuntimeError("AsyncNode not initialized; call initialize() first")
 
-        async with anyio.create_task_group() as tg:
-            _attached_consumers = []
-            _action_servers = []
+        _attached_consumers = []
 
-            for spec in self.__action_handler_specs:
-                async_fn = spec.async_fn
-                action_type = spec.action_type
-                action_name = spec.action_name
-                kwargs = spec.kwargs
+        for spec in self.__action_handler_specs:
+            handler, coro = _wrap_handler_with_backpressure(
+                spec.async_fn, spec.backpressure_handler
+            )
 
-                _action_servers.append(
-                    rclpy_async.action_server(
-                        self.__inner,
-                        action_type,
-                        action_name,
-                        async_fn,
-                        **kwargs,
-                    )
+            self.__exit_stack.enter_context(
+                rclpy_async.action_server(
+                    self.__inner,
+                    spec.action_type,
+                    spec.action_name,
+                    handler,
+                    **spec.kwargs,
                 )
+            )
 
-            for spec in self.__service_handler_specs:
-                async_fn = spec.async_fn
-                srv_type = spec.srv_type
-                srv_name = spec.srv_name
-                kwargs = spec.kwargs
+            if coro is not None:
+                _attached_consumers.append(coro)
 
-                self.__inner.create_service(
-                    srv_type,
-                    srv_name,
-                    async_fn,
-                    **kwargs,
-                )
+        for spec in self.__service_handler_specs:
+            async_fn = spec.async_fn
+            srv_type = spec.srv_type
+            srv_name = spec.srv_name
 
-            for spec in self.__topic_handler_specs:
-                async_fn = spec.async_fn  # expects (ctx, msg)
-                msg_type = spec.msg_type
-                topic_name = spec.topic_name
-                qos_profile = spec.qos_profile
-                max_queue_size = spec.max_queue_size
-                drop_oldest = spec.drop_oldest
-                kwargs = spec.kwargs
+            handler, coro = _wrap_handler_with_backpressure(
+                async_fn, spec.backpressure_handler
+            )
+            self.__inner.create_service(
+                srv_type,
+                srv_name,
+                handler,
+                **spec.kwargs,
+            )
 
-                send_stream, receive_stream = anyio.create_memory_object_stream(
-                    max_queue_size
-                )
+            if coro is not None:
+                _attached_consumers.append(coro)
 
-                def _sub_callback(msg, *, _send=send_stream, _recv=receive_stream):
-                    try:
-                        _send.send_nowait(msg)
-                    except anyio.WouldBlock:
-                        if max_queue_size == 0:
-                            return
-                        if drop_oldest:
-                            try:
-                                _ = _recv.receive_nowait()
-                            except anyio.WouldBlock:
-                                return
-                            try:
-                                _send.send_nowait(msg)
-                            except anyio.WouldBlock:
-                                pass
+        for spec in self.__topic_handler_specs:
+            async_fn = spec.async_fn
+            msg_type = spec.msg_type
+            topic_name = spec.topic_name
+            qos_profile = spec.qos_profile
 
-                self.__inner.create_subscription(
-                    msg_type,
-                    topic_name,
-                    _sub_callback,
-                    qos_profile=qos_profile,
-                    **kwargs,
-                )
+            handler, coro = _wrap_handler_with_backpressure(
+                async_fn, spec.backpressure_handler
+            )
+            self.__inner.create_subscription(
+                msg_type,
+                topic_name,
+                handler,
+                qos_profile=qos_profile,
+                **spec.kwargs,
+            )
 
-                async def _consumer_task(fn=async_fn, _recv=receive_stream):
-                    async for _msg in _recv:
-                        await fn(_msg)
+            if coro is not None:
+                _attached_consumers.append(coro)
 
-                _attached_consumers.append(_consumer_task)
+        for spec in self.__timer_handler_specs:
+            timer_period_sec = spec.timer_period_sec
+            async_fn = spec.async_fn
+            if callable(timer_period_sec):
+                try:
+                    period_value = float(timer_period_sec())
+                except Exception:
+                    period_value = 1.0
+            else:
+                period_value = float(timer_period_sec)
 
-            for spec in self.__timer_handler_specs:
-                async_fn = spec.async_fn  # expects (ctx)
-                kwargs = spec.kwargs
-                timer_period_sec = spec.timer_period_sec
-                if callable(timer_period_sec):
-                    try:
-                        period_value = float(timer_period_sec())
-                    except Exception:
-                        period_value = 1.0
-                else:
-                    period_value = float(timer_period_sec)
-                max_queue_size = spec.max_queue_size
-                drop_oldest = spec.drop_oldest
+            handler, coro = _wrap_handler_with_backpressure(
+                async_fn, spec.backpressure_handler
+            )
+            self.__inner.create_timer(period_value, handler, **spec.kwargs)
 
-                send_stream, receive_stream = anyio.create_memory_object_stream(
-                    max_queue_size
-                )
+            if coro is not None:
+                _attached_consumers.append(coro)
 
-                def _timer_callback(_send=send_stream, _recv=receive_stream):
-                    try:
-                        _send.send_nowait(None)
-                    except anyio.WouldBlock:
-                        if max_queue_size == 0:
-                            return
-                        if drop_oldest:
-                            try:
-                                _ = _recv.receive_nowait()
-                            except anyio.WouldBlock:
-                                return
-                            try:
-                                _send.send_nowait(None)
-                            except anyio.WouldBlock:
-                                pass
+        return _attached_consumers
 
-                self.__inner.create_timer(period_value, _timer_callback, **kwargs)
 
-                async def _consumer_task(fn=async_fn, _recv=receive_stream):
-                    async for _ in _recv:
-                        await fn()
+def gather_nodes(*nodes: AsyncNode) -> List[Callable[[], Awaitable[None]]]:
+    """Gather coroutines from multiple AsyncNode instances."""
+    coroutines = []
+    for node in nodes:
+        coroutines.extend(node.gather_coroutines())
+    return coroutines
 
-                _attached_consumers.append(_consumer_task)
 
-            for consumer_task in _attached_consumers:
-                tg.start_soon(consumer_task)
+async def run(*nodes: AsyncNode) -> None:
+    async with anyio.create_task_group() as tg:
+        coroutines = gather_nodes(*nodes)
+        for consumer_task in coroutines:
+            tg.start_soon(consumer_task)
 
-            for action_server in _action_servers:
-                action_server.__enter__()
+        await anyio.sleep(float("inf"))
 
-            try:
-                # Sleep forever; cancellation of the task group stops processing.
-                await anyio.sleep(float("inf"))
-            finally:
-                for action_server in _action_servers:
-                    action_server.__exit__(None, None, None)
 
-    async def spin_one(self) -> None:
-        """Run a single executor managing this node and spin handlers concurrently."""
-        if self.__inner is None:
-            raise RuntimeError("AsyncNode not initialized; call initialize() first")
-        async with rclpy_async.start_executor() as xtor:
-            xtor.add_node(self.__inner)
-            await self.spin()
+def _wrap_handler_with_backpressure(
+    async_fn: Callable[..., Awaitable[None]],
+    spec: Optional[BackpressureHandlerSpec] = None,
+) -> Tuple[Callable[..., None], Callable[[], Awaitable[None]]]:
+    """Wrap an async function with a memory object stream for backpressure handling."""
+
+    if spec is None:
+        return async_fn, None
+
+    send_stream, receive_stream = anyio.create_memory_object_stream(spec.max_queue_size)
+
+    def _sub_callback(*args, **kwargs):
+        try:
+            send_stream.send_nowait((args, kwargs))
+        except anyio.WouldBlock:
+            if spec.max_queue_size == 0:
+                return
+            if spec.drop_oldest:
+                try:
+                    _ = receive_stream.receive_nowait()
+                except anyio.WouldBlock:
+                    return
+                try:
+                    send_stream.send_nowait((args, kwargs))
+                except anyio.WouldBlock:
+                    pass
+
+    async def _consumer_task():
+        async for args, kwargs in receive_stream:
+            await async_fn(*args, **kwargs)
+
+    return _sub_callback, _consumer_task

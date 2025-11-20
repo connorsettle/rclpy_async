@@ -1,9 +1,11 @@
+from typing import Callable
+
 import anyio
 import rclpy
 from example_interfaces.action import Fibonacci
 
 import rclpy_async
-from rclpy_async.async_node import AsyncNode
+from rclpy_async import AsyncNode
 
 node = AsyncNode("fibonacci_action_client")
 
@@ -16,10 +18,12 @@ async def main():
         xtor.add_node(node)
 
         with rclpy_async.action_client(node, Fibonacci, "fibonacci") as action_client:
-            result = await action_client(
-                Fibonacci.Goal(order=10),
-                lambda msg: node.get_logger().info(f"Fibonacci feedback: {msg.feedback}"),  # type: ignore
+            print_feedback: Callable[[Fibonacci.Impl.FeedbackMessage], None] = (
+                lambda msg: node.get_logger().info(
+                    f"Fibonacci feedback: {msg.feedback}"
+                )
             )
+            result = await action_client(Fibonacci.Goal(order=10), print_feedback)
             node.get_logger().info(f"Fibonacci result: {result}")
 
 

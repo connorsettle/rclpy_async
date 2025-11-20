@@ -2,7 +2,8 @@ import anyio
 import rclpy
 from std_msgs.msg import String
 
-from rclpy_async.async_node import AsyncNode
+import rclpy_async
+from rclpy_async import AsyncNode, async_run
 
 node = AsyncNode("minimal_publisher")
 
@@ -23,7 +24,9 @@ async def main():
     node.state.i = 0
     node.state.publisher_ = node.create_publisher(String, "topic", 10)
 
-    await node.spin_one()
+    async with rclpy_async.start_executor() as xtor:
+        xtor.add_node(node)
+        await async_run(node)
 
 
 if __name__ == "__main__":

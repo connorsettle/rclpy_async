@@ -5,7 +5,7 @@ import rclpy
 from example_interfaces.srv import AddTwoInts
 
 import rclpy_async
-from rclpy_async.async_node import AsyncNode
+from rclpy_async import AsyncNode
 
 node = AsyncNode("minimal_client_async")
 

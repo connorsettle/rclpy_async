@@ -1,20 +1,21 @@
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from rclpy.qos import QoSProfile
 
+from ._base_handler_spec import BaseHandlerSpec
+
 
 @dataclass
-class TopicHandlerSpec:
+class TopicHandlerSpec(BaseHandlerSpec[[Any], None]):
     """Specification for a subscription handler.
 
     async_fn signature: (message: MsgType) -> Awaitable[None]
+
+    Args:
+        BaseHandlerSpec (_type_): Inherits from BaseHandlerSpec
     """
 
     msg_type: type
     topic_name: str
     qos_profile: QoSProfile
-    max_queue_size: int
-    drop_oldest: bool
-    kwargs: dict[str, Any]
-    async_fn: Callable[[Any], Awaitable[None]]

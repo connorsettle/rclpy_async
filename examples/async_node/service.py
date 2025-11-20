@@ -2,7 +2,8 @@ import anyio
 import rclpy
 from example_interfaces.srv import AddTwoInts
 
-from rclpy_async.async_node import AsyncNode
+import rclpy_async
+from rclpy_async import AsyncNode, async_run
 
 node = AsyncNode("minimal_service")
 
@@ -19,7 +20,9 @@ async def main():
     rclpy.init()
     node.initialize()
 
-    await node.spin_one()
+    async with rclpy_async.start_executor() as xtor:
+        xtor.add_node(node)
+        await async_run(node)
 
 
 if __name__ == "__main__":
